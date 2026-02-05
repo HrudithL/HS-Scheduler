@@ -1,0 +1,24 @@
+{
+  "name": "schedulebuilder-scraper",
+  "version": "1.0.0",
+  "description": "SchooLinks course catalog scraper for Katy ISD",
+  "main": "src/scrape.ts",
+  "scripts": {
+    "scrape": "ts-node src/scrape.ts",
+    "test": "ts-node src/scrape.ts --limit 100"
+  },
+  "keywords": ["scraper", "schoolinks", "playwright"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "playwright": "^1.41.0",
+    "zod": "^3.22.4",
+    "p-limit": "^5.0.0"
+  }
+}
+
