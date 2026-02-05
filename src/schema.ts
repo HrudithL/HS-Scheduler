@@ -54,6 +54,31 @@ export function cleanDescription(value: string | null | undefined): string {
 }
 
 /**
+ * Calculates GPA based on course name and tags
+ * - AP or KAP courses (in name or tags) → 5.0 GPA
+ * - Dual Credit courses (name contains "Dual Credit" or tag "DC") → 4.5 GPA
+ * - All other courses → 4.0 GPA
+ */
+export function calculateGPA(courseName: string, tags: string[]): number {
+  const nameUpper = courseName.toUpperCase();
+  const tagsUpper = tags.map(t => t.toUpperCase());
+  
+  // Check for AP or KAP in course name or tags
+  if (nameUpper.includes("AP") || nameUpper.includes("KAP") ||
+      tagsUpper.includes("AP") || tagsUpper.includes("KAP")) {
+    return 5.0;
+  }
+  
+  // Check for Dual Credit in course name or "DC" tag
+  if (nameUpper.includes("DUAL CREDIT") || tagsUpper.includes("DC")) {
+    return 4.5;
+  }
+  
+  // Default GPA for regular courses
+  return 4.0;
+}
+
+/**
  * Zod schema for a single course (without source - moved to catalog level)
  */
 export const CourseSchema = z.object({
@@ -61,6 +86,7 @@ export const CourseSchema = z.object({
   courseName: z.string().min(1),
   credits: z.number(),
   tags: z.array(z.string()),
+  gpa: z.number(),
   
   subject: z.string(),
   term: z.string(),
@@ -102,11 +128,13 @@ export function createCourse(data: {
   enrollmentNotes?: string;
   courseDescription?: string;
 }): Course {
+  const courseName = data.courseName.trim();
   return {
     courseCode: data.courseCode.trim(),
-    courseName: data.courseName.trim(),
+    courseName: courseName,
     credits: typeof data.credits === "number" ? data.credits : parseCredits(data.credits),
     tags: data.tags,
+    gpa: calculateGPA(courseName, data.tags),
     subject: normalizeNA(data.subject),
     term: normalizeNA(data.term),
     eligibleGrades: Array.isArray(data.eligibleGrades) 
