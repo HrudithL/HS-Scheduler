@@ -5,7 +5,8 @@
   "main": "src/scrape.ts",
   "scripts": {
     "scrape": "ts-node src/scrape.ts",
-    "test": "ts-node src/scrape.ts --limit 100"
+    "test": "ts-node src/scrape.ts --limit 100",
+    "migrate:prerequisites": "ts-node src/migrations/migrate-prerequisites.ts"
   },
   "keywords": ["scraper", "schoolinks", "playwright"],
   "author": "",
