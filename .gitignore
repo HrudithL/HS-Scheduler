@@ -3,4 +3,5 @@ dist/
 output/*.partial.json
 *.log
 .env
-
+.cursor
+.agents
