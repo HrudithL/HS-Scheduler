@@ -67,7 +67,8 @@ export async function findCourseCards(page: Page): Promise<CourseCardInfo[]> {
       if (cells.length < 3) continue;
       
       const firstCellText = cells[0].textContent?.trim() || '';
-      const codeMatch = firstCellText.match(/^([0-9]{4}[A-Z]+[0-9]*)\b/);
+      // Match both high school format (4 digits: 0020A) and junior high format (J prefix: J0072A)
+      const codeMatch = firstCellText.match(/^((?:[0-9]{4}|J[0-9]+)[A-Z]+[0-9]*)\b/);
       if (!codeMatch) continue;
       
       const courseCode = codeMatch[1];
@@ -83,13 +84,172 @@ export async function findCourseCards(page: Page): Promise<CourseCardInfo[]> {
       const credits = creditsMatch ? creditsMatch[1] : '0';
       
       // Extract tags from remaining cells
+      // Tags are in nested div elements, so we need to extract each div separately
       const tags: string[] = [];
+      
+      // Helper function to map full-text descriptions to tag abbreviations
+      const mapTextToTag = (text: string): string | null => {
+        const upperText = text.toUpperCase().trim();
+        // Map common full-text descriptions to abbreviations
+        if (upperText.includes('ADVANCED PLACEMENT') || upperText === 'ADVANCED PLACEMENT') return 'AP';
+        if (upperText === 'VIRTUAL' || (upperText.includes('VIRTUAL') && !upperText.match(/^[A-Z]{1,4}$/))) return 'VIR';
+        if (upperText.includes('DUAL CREDIT') || upperText === 'DUAL CREDIT') return 'DC';
+        if (upperText.includes('COURSE FEE REQUIRED') || upperText === 'COURSE FEE REQUIRED') return '$';
+        if (upperText.includes('KAP') || upperText === 'KAP') return 'KAP';
+        return null;
+      };
+      
+      // Helper function to split concatenated tag strings (e.g., "CTEJHJHHS" -> ["CTE", "JH", "JH", "HS"])
+      const splitConcatenatedTags = (text: string): string[] => {
+        if (!text || text.length === 0) return [];
+        const upperText = text.toUpperCase();
+        
+        // Common tag patterns (2-4 uppercase letters)
+        const commonTags = ['KAP', 'AP', 'DC', 'VIR', 'CTE', 'JH', 'HS', 'MS', 'ES', 'IB', 'GT', 'ESL', 'SPED'];
+        const foundTags: string[] = [];
+        let remaining = upperText;
+        
+        // Try to match common tags first (longest first to avoid partial matches)
+        const sortedTags = commonTags.sort((a, b) => b.length - a.length);
+        for (const tag of sortedTags) {
+          while (remaining.includes(tag)) {
+            const index = remaining.indexOf(tag);
+            foundTags.push(tag);
+            remaining = remaining.substring(0, index) + remaining.substring(index + tag.length);
+          }
+        }
+        
+        // Also extract any remaining 1-4 uppercase letter sequences
+        const remainingTags = remaining.match(/[A-Z]{1,4}/g) || [];
+        foundTags.push(...remainingTags);
+        
+        return foundTags.filter(t => t.length > 0);
+      };
+      
       for (let i = 3; i < cells.length; i++) {
-        const cellText = cells[i].textContent?.trim() || '';
-        const cellTags = cellText.split(/\s+/).filter((t: string) => 
-          t.length > 0 && t.length <= 4 && (t.match(/^[A-Z]{1,4}$/) || t === "$" || t === "★" || t === "⭐")
-        );
-        tags.push(...cellTags);
+        const cell = cells[i];
+        
+        // Strategy 1: Extract from nested div elements (most reliable for structured tags)
+        // Look for any divs that are direct children of the cell or nested deeper
+        const allDivs = cell.querySelectorAll('div');
+        const tagDivs: HTMLElement[] = [];
+        const processedTexts = new Set<string>();
+        
+        // Find divs that contain tag-like content (not empty, not too long, likely a tag)
+        for (const div of Array.from(allDivs)) {
+          const divText = (div.textContent || '').trim();
+          if (!divText || divText.length > 50) continue; // Skip empty or very long text (likely descriptions)
+          
+          // Skip if we've already processed this exact text (avoid duplicates from nested divs)
+          if (processedTexts.has(divText)) continue;
+          
+          // Check if this div looks like it contains a tag (short text, or matches tag patterns)
+          const upperDivText = divText.toUpperCase();
+          const isLikelyTag = divText.length <= 25 && (
+            divText.match(/^[A-Z]{1,4}$/) || 
+            divText === "$" || 
+            divText === "★" || 
+            divText === "⭐" ||
+            upperDivText.includes('ADVANCED PLACEMENT') ||
+            upperDivText.includes('VIRTUAL') ||
+            upperDivText.includes('DUAL CREDIT') ||
+            upperDivText.includes('COURSE FEE REQUIRED') ||
+            upperDivText === 'KAP' ||
+            upperDivText.includes('KAP')
+          );
+          
+          if (isLikelyTag) {
+            // Check if this div is a leaf (no child divs with text) or has minimal nesting
+            // We want the innermost div that contains the tag text
+            const childDivsWithText = Array.from(div.querySelectorAll('div')).filter(d => {
+              const childText = (d.textContent || '').trim();
+              return childText.length > 0 && childText !== divText;
+            });
+            
+            // If no children with different text, or if this div's text is different from children, use it
+            if (childDivsWithText.length === 0) {
+              tagDivs.push(div);
+              processedTexts.add(divText);
+            } else {
+              // Check if any child has the same text (then use the child instead)
+              const hasSameTextChild = childDivsWithText.some(d => (d.textContent || '').trim() === divText);
+              if (!hasSameTextChild) {
+                tagDivs.push(div);
+                processedTexts.add(divText);
+              }
+            }
+          }
+        }
+        
+        // Extract tags from the identified divs
+        for (const div of tagDivs) {
+          const divText = (div.textContent || '').trim();
+          if (!divText) continue;
+          
+          // Check if it's a mapped full-text description
+          const mappedTag = mapTextToTag(divText);
+          if (mappedTag && !tags.includes(mappedTag)) {
+            tags.push(mappedTag);
+            continue;
+          }
+          
+          // Check if it's a standard 1-4 uppercase letter tag
+          if (divText.match(/^[A-Z]{1,4}$/) || divText === "$" || divText === "★" || divText === "⭐") {
+            if (!tags.includes(divText)) {
+              tags.push(divText);
+            }
+          }
+        }
+        
+        // If we found tags from divs, skip the fallback text extraction
+        if (tagDivs.length > 0) {
+          continue;
+        }
+        
+        // Strategy 2: Fallback - extract from cell textContent (for cases without nested divs)
+        const cellText = cell.textContent?.trim() || '';
+        if (cellText && tagDivs.length === 0) {
+          // Check if it's a concatenated tag string (all uppercase, no spaces)
+          if (cellText.match(/^[A-Z]{4,}$/) && !cellText.includes(' ')) {
+            const splitTags = splitConcatenatedTags(cellText);
+            for (const tag of splitTags) {
+              if (!tags.includes(tag)) {
+                tags.push(tag);
+              }
+            }
+            continue;
+          }
+          
+          // Check for mapped full-text descriptions
+          const mappedTag = mapTextToTag(cellText);
+          if (mappedTag && !tags.includes(mappedTag)) {
+            tags.push(mappedTag);
+          }
+          
+          // Check for multiple phrases that might map to tags
+          if (cellText.includes('Course Fee Required') && !tags.includes('$')) {
+            tags.push('$');
+          }
+          if (cellText.includes('Virtual') && !tags.includes('VIR')) {
+            tags.push('VIR');
+          }
+          if (cellText.includes('Advanced Placement') && !tags.includes('AP')) {
+            tags.push('AP');
+          }
+          if (cellText.includes('Dual Credit') && !tags.includes('DC')) {
+            tags.push('DC');
+          }
+          
+          // Standard extraction - split by whitespace and filter
+          const cellTags = cellText.split(/\s+/).filter((t: string) => 
+            t.length > 0 && t.length <= 4 && (t.match(/^[A-Z]{1,4}$/) || t === "$" || t === "★" || t === "⭐")
+          );
+          for (const tag of cellTags) {
+            if (!tags.includes(tag)) {
+              tags.push(tag);
+            }
+          }
+        }
       }
       
       seenCodes.add(courseCode);
@@ -115,7 +275,8 @@ export async function findCourseRowByCode(page: Page, courseCode: string): Promi
       const firstCell = row.querySelector('td:first-child');
       if (firstCell) {
         const text = firstCell.textContent?.trim() || '';
-        const codeMatch = text.match(/^([0-9]{4}[A-Z]+[0-9]*)\b/);
+        // Match both high school format (4 digits: 0020A) and junior high format (J prefix: J0072A)
+        const codeMatch = text.match(/^((?:[0-9]{4}|J[0-9]+)[A-Z]+[0-9]*)\b/);
         if (codeMatch && codeMatch[1] === searchCode) {
           // Mark the row with a temporary attribute
           (row as HTMLElement).setAttribute('data-course-code-target', searchCode);
@@ -141,9 +302,10 @@ export async function findCourseRowByCode(page: Page, courseCode: string): Promi
  */
 export async function extractCourseCode(card: Locator): Promise<string> {
   try {
-    // Look for text that matches course code pattern (e.g., "0103VIRSA")
+    // Look for text that matches course code pattern (e.g., "0103VIRSA" or "J0072A")
     const text = await card.innerText();
-    const match = text.match(/\b[0-9]{4}[A-Z]+[0-9]*\b/);
+    // Match both high school format (4 digits: 0020A) and junior high format (J prefix: J0072A)
+    const match = text.match(/\b(?:[0-9]{4}|J[0-9]+)[A-Z]+[0-9]*\b/);
     return match ? match[0] : "";
   } catch (error) {
     return "";
@@ -184,7 +346,8 @@ export async function extractHeaderFields(card: Locator): Promise<{
         }
         
         
-        if (courseCode && courseCode.match(/^[0-9]{4}[A-Z]+/)) {
+        // Match both high school format (4 digits: 0020A) and junior high format (J prefix: J0072A)
+        if (courseCode && courseCode.match(/^(?:[0-9]{4}|J[0-9]+)[A-Z]+/)) {
           return { courseCode, courseName, credits, tags };
         }
       }
@@ -217,7 +380,8 @@ export async function extractHeaderFields(card: Locator): Promise<{
             tags.push(...cellTags);
           }
           
-          if (courseCode && courseCode.match(/^[0-9]{4}[A-Z]+/)) {
+          // Match both high school format (4 digits: 0020A) and junior high format (J prefix: J0072A)
+          if (courseCode && courseCode.match(/^(?:[0-9]{4}|J[0-9]+)[A-Z]+/)) {
             return { courseCode, courseName, credits, tags };
           }
         }
@@ -236,8 +400,9 @@ export async function extractHeaderFields(card: Locator): Promise<{
     const tags: string[] = [];
     
     // Find course code first
+    // Match both high school format (4 digits: 0020A) and junior high format (J prefix: J0072A)
     for (const part of parts) {
-      if (part.match(/^[0-9]{4}[A-Z]+[0-9]*$/)) {
+      if (part.match(/^(?:[0-9]{4}|J[0-9]+)[A-Z]+[0-9]*$/)) {
         courseCode = part;
         break;
       }
@@ -245,7 +410,8 @@ export async function extractHeaderFields(card: Locator): Promise<{
     
     if (!courseCode) {
       // Try regex match on full text
-      const codeMatch = text.match(/\b([0-9]{4}[A-Z]+[0-9]*)\b/);
+      // Match both high school format (4 digits: 0020A) and junior high format (J prefix: J0072A)
+      const codeMatch = text.match(/\b((?:[0-9]{4}|J[0-9]+)[A-Z]+[0-9]*)\b/);
       if (codeMatch) {
         courseCode = codeMatch[1];
       }
@@ -501,7 +667,7 @@ async function extractFieldByLabel(
         if (labelIndex !== -1) {
           const afterLabel = containerText.substring(labelIndex + label.length);
           // Extract value until next label or end
-          const nextLabelMatch = afterLabel.match(/^[:\s]*(.+?)(?=\n\s*\*\*|$)/s);
+          const nextLabelMatch = afterLabel.match(/^[:\s]*([\s\S]+?)(?=\n\s*\*\*|$)/);
           const value = nextLabelMatch ? nextLabelMatch[1].trim() : afterLabel.trim();
           return value;
         }
@@ -625,5 +791,277 @@ export async function retryOperation<T>(
   }
   
   throw lastError || new Error("Operation failed after retries");
+}
+
+/**
+ * Gets the list of available schools from the school filter dropdown
+ */
+export async function getAvailableSchools(page: Page): Promise<string[]> {
+  try {
+    // Use the specific school-filter ID
+    const schoolInput = page.locator('#school-filter');
+    const inputCount = await schoolInput.count();
+    
+    if (inputCount === 0) {
+      return [];
+    }
+
+    // Find all "Open" buttons and identify which belongs to school-filter
+    // (There are multiple dropdowns: school-level-filter and school-filter)
+    const buttonInfo = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button[aria-label="Open"]'));
+      return buttons.map((btn, idx) => {
+        const parent = btn.closest('[data-testid="select-container"], .MuiAutocomplete-root, .MuiFormControl-root');
+        const input = parent?.querySelector('input');
+        return {
+          index: idx,
+          inputId: input?.id || null,
+        };
+      });
+    });
+    
+    // Find the button index that corresponds to school-filter input (not school-level-filter)
+    const schoolFilterButtonIndex = buttonInfo.findIndex(b => b.inputId === 'school-filter');
+    
+    // Click the specific button for school-filter input
+    try {
+      if (schoolFilterButtonIndex >= 0) {
+        const allOpenButtons = page.locator('button[aria-label="Open"]');
+        const correctButton = allOpenButtons.nth(schoolFilterButtonIndex);
+        await correctButton.click({ timeout: 5000 });
+      } else {
+        // Fallback: click the input directly
+        await schoolInput.click({ timeout: 5000 });
+      }
+    } catch (error) {
+      return [];
+    }
+    
+    await page.waitForTimeout(500);
+
+    // Wait for the specific school-filter-listbox (not school-level-filter-listbox)
+    let listbox = null;
+    try {
+      // Wait specifically for school-filter-listbox
+      listbox = page.locator('#school-filter-listbox').first();
+      await listbox.waitFor({ timeout: 5000, state: 'visible' });
+    } catch (error) {
+      // Try to find listbox by checking all listboxes and finding the one that's not school-level
+      const allListboxes = page.locator('[role="listbox"]');
+      const count = await allListboxes.count();
+      for (let i = 0; i < count; i++) {
+        const candidate = allListboxes.nth(i);
+        const id = await candidate.getAttribute('id');
+        if (id && id.includes('school-filter') && !id.includes('school-level')) {
+          listbox = candidate;
+          break;
+        }
+      }
+      
+      if (!listbox) {
+        return [];
+      }
+    }
+
+    await page.waitForTimeout(300); // Additional wait for options to render
+
+    // Extract all option texts from the school-filter-listbox
+    const schools = await page.evaluate(() => {
+      // Find the school-filter-listbox specifically (not school-level-filter-listbox)
+      let listbox: Element | null = document.querySelector('#school-filter-listbox');
+      
+      // Fallback: find any listbox that's not the school-level-filter-listbox
+      if (!listbox) {
+        const allListboxes = Array.from(document.querySelectorAll('[role="listbox"]'));
+        listbox = allListboxes.find(lb => {
+          const id = lb.id;
+          return id && id.includes('school-filter') && !id.includes('school-level');
+        }) || null;
+      }
+
+      if (!listbox) return [];
+
+      // Try multiple selectors for options
+      const optionSelectors = [
+        '[role="option"]',
+        'li[role="option"]',
+        'li',
+        'div[role="option"]'
+      ];
+
+      let options: Element[] = [];
+      for (const selector of optionSelectors) {
+        options = Array.from(listbox.querySelectorAll(selector));
+        if (options.length > 0) break;
+      }
+
+      const allTexts = options.map(opt => (opt.textContent || '').trim());
+      const filtered = allTexts.filter(text => {
+        // Filter out empty strings and generic options
+        return text.length > 0 && 
+               text !== 'All Schools' && 
+               text !== 'All' &&
+               text !== 'District-wide' &&
+               text !== 'High school' &&
+               text !== 'Middle school';
+      });
+
+      return filtered;
+    });
+
+    // Close the dropdown
+    try {
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(200);
+    } catch (error) {
+      // Try clicking outside
+      try {
+        await page.click('body', { position: { x: 0, y: 0 } });
+        await page.waitForTimeout(200);
+      } catch (error2) {
+        // Ignore
+      }
+    }
+
+    return schools;
+  } catch (error) {
+    console.error("Error getting available schools:", error);
+    return [];
+  }
+}
+
+/**
+ * Selects a school from the school filter dropdown
+ */
+export async function selectSchool(page: Page, schoolName: string): Promise<void> {
+  try {
+    // Use the specific school-filter ID
+    const schoolInput = page.locator('#school-filter');
+    const inputCount = await schoolInput.count();
+    
+    if (inputCount === 0) {
+      throw new Error('School filter input not found');
+    }
+
+    // Find all "Open" buttons and identify which belongs to school-filter
+    const buttonInfo = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button[aria-label="Open"]'));
+      return buttons.map((btn, idx) => {
+        const parent = btn.closest('[data-testid="select-container"], .MuiAutocomplete-root, .MuiFormControl-root');
+        const input = parent?.querySelector('input');
+        return {
+          index: idx,
+          inputId: input?.id || null,
+        };
+      });
+    });
+    
+    // Find the button index that corresponds to school-filter input
+    const schoolFilterButtonIndex = buttonInfo.findIndex(b => b.inputId === 'school-filter');
+    
+    // Click the specific button for school-filter input
+    if (schoolFilterButtonIndex >= 0) {
+      const allOpenButtons = page.locator('button[aria-label="Open"]');
+      const correctButton = allOpenButtons.nth(schoolFilterButtonIndex);
+      await correctButton.click({ timeout: 5000 });
+    } else {
+      // Fallback: click the input directly
+      await schoolInput.click({ timeout: 5000 });
+    }
+    
+    await page.waitForTimeout(500);
+
+    // Wait for the specific school-filter-listbox
+    const listbox = page.locator('#school-filter-listbox').first();
+    try {
+      await listbox.waitFor({ timeout: 5000, state: 'visible' });
+    } catch (error) {
+      throw new Error('School filter listbox did not appear');
+    }
+
+    await page.waitForTimeout(300);
+
+    // Find and click the option matching the school name
+    // Try multiple selectors for the option
+    const optionSelectors = [
+      `[role="option"]:has-text("${schoolName}")`,
+      `li[role="option"]:has-text("${schoolName}")`,
+      `li:has-text("${schoolName}")`,
+      `div[role="option"]:has-text("${schoolName}")`
+    ];
+
+    let option = null;
+    for (const selector of optionSelectors) {
+      const candidate = page.locator(selector).first();
+      if (await candidate.count() > 0) {
+        option = candidate;
+        break;
+      }
+    }
+
+    // If not found with :has-text, try exact text match by iterating
+    if (!option || await option.count() === 0) {
+      const allOptions = page.locator('[role="option"], li[role="option"], li, div[role="option"]');
+      const optionCount = await allOptions.count();
+      
+      for (let i = 0; i < optionCount; i++) {
+        const opt = allOptions.nth(i);
+        const text = await opt.textContent();
+        if (text && text.trim() === schoolName) {
+          await opt.click({ timeout: 5000 });
+          await page.waitForTimeout(300);
+          return;
+        }
+      }
+      
+      throw new Error(`School "${schoolName}" not found in dropdown options`);
+    }
+
+    await option.click({ timeout: 5000 });
+    await page.waitForTimeout(300);
+  } catch (error) {
+    console.error(`Error selecting school "${schoolName}":`, error);
+    throw error;
+  }
+}
+
+/**
+ * Waits for the course list to update after selecting a school filter
+ */
+export async function waitForSchoolFilterUpdate(page: Page): Promise<void> {
+  try {
+    // Wait for the course list to update - this could be:
+    // 1. A loading indicator to disappear
+    // 2. Course rows to change/update
+    // 3. A specific element that indicates filtering is complete
+    
+    // Wait a bit for the filter to apply
+    await page.waitForTimeout(1000);
+
+    // Wait for any loading indicators to disappear
+    try {
+      await page.waitForSelector('[role="progressbar"], [class*="loading"], [class*="spinner"]', { 
+        state: 'hidden', 
+        timeout: 5000 
+      });
+    } catch (error) {
+      // Loading indicator might not exist, that's okay
+    }
+
+    // Wait for course rows to be present (or updated)
+    try {
+      await page.waitForSelector('tr, [class*="course"], [data-testid*="course"]', { timeout: 10000 });
+    } catch (error) {
+      // Course rows might not be visible yet, wait a bit more
+      await page.waitForTimeout(2000);
+    }
+
+    // Additional wait for React to re-render
+    await page.waitForTimeout(500);
+  } catch (error) {
+    console.warn("Warning while waiting for school filter update:", error);
+    // Don't throw - just wait a bit longer as fallback
+    await page.waitForTimeout(2000);
+  }
 }
 

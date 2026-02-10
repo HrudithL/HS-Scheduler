@@ -1,0 +1,33 @@
+Available schools:
+  - Adams Junior High
+  - Beck Junior High
+  - Beckendorff Junior High
+  - Cardiff Junior High
+  - Cinco Ranch HS
+  - Cinco Ranch Junior High
+  - Freeman HS
+  - Harris County JJAEP
+  - Haskett Junior High
+  - Jordan HS
+  - Katy HS
+  - Katy Junior High
+  - Legacy Virtual HS
+  - Mayde Creek HS
+  - Mayde Creek Junior High
+  - McDonald Junior High
+  - McMeans Junior High
+  - Memorial Parkway Junior High
+  - Miller Career and Tech Center
+  - Morton Ranch HS
+  - Morton Ranch Junior High
+  - Nelson Junior High
+  - Opportunity Awareness Center
+  - Paetow HS
+  - Seven Lakes HS
+  - Seven Lakes Junior High
+  - Stockdick Junior High
+  - Taylor HS
+  - Tays Junior High
+  - Tompkins HS
+  - West Memorial Junior High
+  - WoodCreek Junior High

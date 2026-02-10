@@ -10,6 +10,9 @@ import {
   collapseCourseCard,
   retryOperation,
   CourseCardInfo,
+  getAvailableSchools,
+  selectSchool,
+  waitForSchoolFilterUpdate,
 } from "./dom";
 import {
   Course,
@@ -22,12 +25,11 @@ const TARGET_URL =
   "https://app.schoolinks.com/course-catalog/katy-isd/course-offerings";
 const DISTRICT = "katy-isd";
 const OUTPUT_DIR = "output";
-const OUTPUT_FILE = path.join(OUTPUT_DIR, "courses.katy-isd.json");
-const CHECKPOINT_FILE = path.join(OUTPUT_DIR, "courses.katy-isd.partial.json");
+const OUTPUT_SCHOOLS_DIR = path.join(OUTPUT_DIR, "schools");
 
-const CHECKPOINT_INTERVAL = 100; // Save every 100 courses
 const PROGRESS_LOG_INTERVAL = 50; // Log every 50 courses
 const MAX_SCROLL_ATTEMPTS = 15; // Stop scrolling after count is stable for this many attempts
+const CHECKPOINT_INTERVAL = 200; // Save progress every 200 courses
 
 /**
  * Scrolls the page to load courses via infinite scroll
@@ -46,6 +48,15 @@ async function scrollToLoadCourses(page: Page, limit: number | null = null): Pro
   let stableCount = 0;
   let maxIterations = limit ? Math.ceil(limit / 10) * 2 : 1000; // Allow many iterations when no limit
   let iteration = 0;
+  
+  // #region agent log
+  const initialState = await page.evaluate(() => {
+    const schoolFilterValue = (document.querySelector('#school-filter') as HTMLInputElement)?.value || '';
+    const rowCount = document.querySelectorAll('tr').length;
+    return { schoolFilterValue, rowCount };
+  });
+  fetch('http://127.0.0.1:7251/ingest/a8ff32ba-c99a-4205-a376-227d419bef9c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'scrape.ts:39',message:'scrollToLoadCourses: initial state',data:initialState,timestamp:Date.now(),runId:'debug1',hypothesisId:'E'})}).catch(()=>{});
+  // #endregion
 
   while (iteration < maxIterations) {
     iteration++;
@@ -139,79 +150,6 @@ async function scrollToLoadCourses(page: Page, limit: number | null = null): Pro
 }
 
 /**
- * Loads checkpoint data if it exists
- */
-async function loadCheckpoint(): Promise<{
-  courses: Course[];
-  processedCodes: Set<string>;
-}> {
-  try {
-    const data = await fs.readFile(CHECKPOINT_FILE, "utf-8");
-    const courses = JSON.parse(data) as Course[];
-    const processedCodes = new Set(courses.map((c) => c.courseCode));
-    console.log(`Loaded checkpoint with ${courses.length} courses`);
-    return { courses, processedCodes };
-  } catch (error) {
-    // No checkpoint exists or error reading it
-    return { courses: [], processedCodes: new Set() };
-  }
-}
-
-/**
- * Saves checkpoint data
- */
-async function saveCheckpoint(courses: Course[]): Promise<void> {
-  try {
-    await fs.writeFile(
-      CHECKPOINT_FILE,
-      JSON.stringify(courses, null, 2),
-      "utf-8"
-    );
-    console.log(`Checkpoint saved: ${courses.length} courses`);
-  } catch (error) {
-    console.error("Error saving checkpoint:", error);
-  }
-}
-
-/**
- * Saves the final output
- */
-async function saveFinalOutput(courses: Course[]): Promise<void> {
-  try {
-    // Create catalog object with source metadata at top level
-    const catalog = {
-      source: {
-        district: DISTRICT,
-        url: TARGET_URL,
-      },
-      courses: courses,
-    };
-    
-    // Validate the entire catalog
-    const validated = CourseCatalogSchema.parse(catalog);
-    
-    await fs.writeFile(
-      OUTPUT_FILE,
-      JSON.stringify(validated, null, 2),
-      "utf-8"
-    );
-    console.log(`\nFinal output saved: ${OUTPUT_FILE}`);
-    console.log(`Total courses: ${courses.length}`);
-    
-    // Delete checkpoint file
-    try {
-      await fs.unlink(CHECKPOINT_FILE);
-      console.log("Checkpoint file removed");
-    } catch {
-      // Ignore if checkpoint doesn't exist
-    }
-  } catch (error) {
-    console.error("Error saving final output:", error);
-    throw error;
-  }
-}
-
-/**
  * Dismisses cookie banners or popups if present
  */
 async function dismissPopups(page: Page): Promise<void> {
@@ -234,11 +172,13 @@ async function dismissPopups(page: Page): Promise<void> {
 
 /**
  * Extracts full course data by expanding the card to get details
+ * Now includes the school name that this course belongs to
  */
 async function extractCourseData(
   cardInfo: CourseCardInfo,
   index: number,
-  page: Page
+  page: Page,
+  schoolName: string
 ): Promise<Course | null> {
   try {
     console.log(
@@ -254,26 +194,52 @@ async function extractCourseData(
     }
 
     // Expand the card with retry logic
-    await retryOperation(
-      async () => {
-        await expandCourseCard(row, page);
-      },
-      2,
-      500
-    );
+    let expansionSucceeded = false;
+    try {
+      await retryOperation(
+        async () => {
+          await expandCourseCard(row, page);
+        },
+        2,
+        500
+      );
+      expansionSucceeded = true;
+    } catch (error) {
+      // Expansion failed - we'll still try to extract what we can
+      console.warn(`Course ${index + 1}: Could not expand card, will extract basic info only`);
+    }
 
-    // Extract detail fields from the expanded row
-    const detailFields = await extractDetailFields(row, page);
+    // Extract detail fields from the expanded row (or empty if expansion failed)
+    let detailFields;
+    if (expansionSucceeded) {
+      detailFields = await extractDetailFields(row, page);
+      
+      // Collapse the card to prevent DOM bloat (only if we expanded it)
+      try {
+        await collapseCourseCard(row, page);
+      } catch (error) {
+        // Ignore collapse errors - not critical
+      }
+    } else {
+      // Use empty/default values if expansion failed
+      detailFields = {
+        subject: "",
+        term: "",
+        eligibleGrades: "",
+        prerequisite: "",
+        corequisite: "",
+        enrollmentNotes: "",
+        courseDescription: "",
+      };
+    }
 
-    // Collapse the card to prevent DOM bloat
-    await collapseCourseCard(row, page);
-
-    // Create and validate the course object
+    // Create and validate the course object with school information
     const courseData = createCourse({
       courseCode: cardInfo.courseCode,
       courseName: cardInfo.courseName,
       credits: cardInfo.credits,
       tags: cardInfo.tags,
+      schools: [schoolName],
       subject: detailFields.subject,
       term: detailFields.term,
       eligibleGrades: detailFields.eligibleGrades,
@@ -296,24 +262,121 @@ async function extractCourseData(
 }
 
 /**
+ * Normalizes a school name into a filesystem-safe slug
+ * Example: "Seven Lakes High School" -> "SevenLakesHighSchool"
+ */
+function schoolNameToSlug(schoolName: string): string {
+  return schoolName.replace(/\s+/g, "").replace(/[^a-zA-Z0-9]/g, "");
+}
+
+/**
+ * Loads existing courses from the output file if it exists
+ * Returns a map of courseCode -> Course and a set of existing course codes
+ */
+async function loadExistingCourses(
+  outputFile: string
+): Promise<{ coursesMap: Record<string, Course>; existingCodes: Set<string> }> {
+  try {
+    const fileContent = await fs.readFile(outputFile, "utf-8");
+    const catalog = JSON.parse(fileContent);
+    const validated = CourseCatalogSchema.parse(catalog);
+
+    const coursesMap: Record<string, Course> = {};
+    const existingCodes = new Set<string>();
+
+    for (const course of validated.courses) {
+      coursesMap[course.courseCode] = course;
+      existingCodes.add(course.courseCode);
+    }
+
+    console.log(`\nLoaded ${validated.courses.length} existing courses from ${outputFile}`);
+    return { coursesMap, existingCodes };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      // File doesn't exist yet - that's fine
+      console.log("\nNo existing file found - will create new file");
+      return { coursesMap: {}, existingCodes: new Set() };
+    }
+    // Other errors (parse errors, etc.) - log and continue as if no file exists
+    console.warn(`\nWarning: Could not load existing file: ${error instanceof Error ? error.message : String(error)}`);
+    console.warn("Will create new file");
+    return { coursesMap: {}, existingCodes: new Set() };
+  }
+}
+
+/**
+ * Saves courses to the output file, merging with existing courses
+ * Returns the total number of courses after merging
+ */
+async function saveCourses(
+  outputFile: string,
+  newCourses: Course[],
+  existingCoursesMap: Record<string, Course>,
+  schoolName: string
+): Promise<number> {
+  // Merge new courses with existing courses
+  const mergedCoursesMap: Record<string, Course> = { ...existingCoursesMap };
+
+  for (const course of newCourses) {
+    if (mergedCoursesMap[course.courseCode]) {
+      // Course already exists - merge school names
+      const existingCourse = mergedCoursesMap[course.courseCode];
+      course.schools.forEach((sch) => {
+        if (!existingCourse.schools.includes(sch)) {
+          existingCourse.schools.push(sch);
+        }
+      });
+    } else {
+      // New course - add it
+      mergedCoursesMap[course.courseCode] = course;
+    }
+  }
+
+  const finalCourses = Object.values(mergedCoursesMap);
+
+  const catalog = {
+    source: {
+      district: DISTRICT,
+      url: TARGET_URL,
+    },
+    courses: finalCourses,
+  };
+
+  const validated = CourseCatalogSchema.parse(catalog);
+
+  await fs.mkdir(OUTPUT_SCHOOLS_DIR, { recursive: true });
+  await fs.writeFile(
+    outputFile,
+    JSON.stringify(validated, null, 2),
+    "utf-8"
+  );
+
+  return finalCourses.length;
+}
+
+/**
  * Main scraper function
  */
 async function main(): Promise<void> {
-  console.log("SchooLinks Course Catalog Scraper");
-  console.log("==================================\n");
+  console.log("SchooLinks Course Catalog Scraper (single school mode)");
+  console.log("======================================================\n");
 
-  // Check for test mode (limit to first N courses)
+  // CLI args:
+  // --school "Exact School Name" (required for scraping)
+  // --limit N (optional: limit number of courses for this school)
+  // --list-schools (optional: just list schools and exit)
   const args = process.argv.slice(2);
   const limitIndex = args.indexOf("--limit");
   const testLimit = limitIndex !== -1 ? parseInt(args[limitIndex + 1]) : null;
 
+  const schoolArgIndex = args.indexOf("--school");
+  const listSchoolsOnly = args.includes("--list-schools");
+  const schoolName =
+    schoolArgIndex !== -1 ? args[schoolArgIndex + 1] : undefined;
+
   if (testLimit) {
     console.log(`TEST MODE: Limited to first ${testLimit} courses\n`);
   }
-
-  // Load checkpoint if it exists
-  const { courses: existingCourses, processedCodes } = await loadCheckpoint();
-  const courses: Course[] = [...existingCourses];
 
   // Launch browser
   console.log("Launching browser...");
@@ -343,100 +406,207 @@ async function main(): Promise<void> {
     }
     await page.waitForTimeout(2000); // Additional wait for dynamic content
 
-    // Scroll to load courses (with limit if in test mode)
-    const targetLimit = testLimit ? testLimit * 2 : null; // Load more rows than needed since some are detail rows
-    const loadedCount = await scrollToLoadCourses(page, targetLimit);
+    // Get list of available schools (for validation / discovery)
+    console.log("\n" + "=".repeat(60));
+    console.log("EXTRACTING SCHOOL LIST");
+    console.log("=".repeat(60) + "\n");
 
-    // Get all course info (extracted upfront to avoid DOM mutation issues)
-    const courseInfoList = await findCourseCards(page);
-    console.log(`\nFound ${courseInfoList.length} unique courses after scroll`);
+    const schools = await getAvailableSchools(page);
+    console.log(`Found ${schools.length} schools on the site`);
+    console.log("Schools:", schools.join(", "));
 
-    if (courseInfoList.length === 0) {
-      console.error("No course cards found! Check the DOM selectors.");
-      await page.screenshot({ path: "debug-no-courses.png" });
+    if (listSchoolsOnly) {
+      console.log("\n--list-schools specified; exiting without scraping.");
       return;
     }
 
-    // Apply test limit if specified (take only the first N unique courses)
-    const coursesToProcess = testLimit ? courseInfoList.slice(0, testLimit) : courseInfoList;
-    console.log(`Processing ${coursesToProcess.length} courses...\n`);
+    if (!schoolName) {
+      console.error(
+        '\nERROR: You must specify a school to scrape using --school "Exact School Name".'
+      );
+      console.log("\nAvailable schools:");
+      for (const s of schools) {
+        console.log(`  - ${s}`);
+      }
+      process.exitCode = 1;
+      return;
+    }
 
-    // Process each course
+    if (!schools.includes(schoolName)) {
+      console.error(`\nERROR: School "${schoolName}" was not found in the dropdown.`);
+      console.log("\nAvailable schools:");
+      for (const s of schools) {
+        console.log(`  - ${s}`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log("\n" + "=".repeat(60));
+    console.log(`SCRAPING SCHOOL: ${schoolName}`);
+    console.log("=".repeat(60) + "\n");
+
+    // Determine output file path
+    await fs.mkdir(OUTPUT_SCHOOLS_DIR, { recursive: true });
+    const slug = schoolNameToSlug(schoolName);
+    const outputFile = path.join(
+      OUTPUT_SCHOOLS_DIR,
+      `courses.katyisd.${slug}.json`
+    );
+
+    // Load existing courses if file exists
+    const { coursesMap: existingCoursesMap, existingCodes } = await loadExistingCourses(outputFile);
+    const originalExistingCount = Object.keys(existingCoursesMap).length;
+
+    // Select the school
+    await selectSchool(page, schoolName);
+    await waitForSchoolFilterUpdate(page);
+    
+    // #region agent log
+    const afterFilterState = await page.evaluate(() => {
+      const schoolFilterValue = (document.querySelector('#school-filter') as HTMLInputElement)?.value || '';
+      const rowCount = document.querySelectorAll('tr').length;
+      const courseRows = Array.from(document.querySelectorAll('tr')).filter(r => {
+        const cells = r.querySelectorAll('td');
+        if (cells.length < 3) return false;
+        const firstCell = cells[0].textContent?.trim() || '';
+        // Match both high school format (4 digits: 0020A) and junior high format (J prefix: J0072A)
+        return /^(?:[0-9]{4}|J[0-9]+)[A-Z]+/.test(firstCell);
+      }).length;
+      const bodyText = document.body.textContent || '';
+      const hasEmptyState = bodyText.includes('No courses') || bodyText.includes('no courses found');
+      return { schoolFilterValue, rowCount, courseRows, hasEmptyState };
+    });
+    fetch('http://127.0.0.1:7251/ingest/a8ff32ba-c99a-4205-a376-227d419bef9c',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'scrape.ts:454',message:'After filter: state before scroll',data:afterFilterState,timestamp:Date.now(),runId:'debug1',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
+
+    // Scroll to load all courses for this school
+    const targetLimit = testLimit ? testLimit * 2 : null;
+    await scrollToLoadCourses(page, targetLimit);
+
+    // Get all course info for this school
+    const courseInfoList = await findCourseCards(page);
+    console.log(`\nFound ${courseInfoList.length} courses on website for ${schoolName}`);
+
+    if (courseInfoList.length === 0) {
+      console.warn(`No courses found for ${schoolName}, nothing to save.`);
+      return;
+    }
+
+    // Filter to only new courses (not in existing file)
+    const newCourseInfoList = courseInfoList.filter(
+      (cardInfo) => !existingCodes.has(cardInfo.courseCode)
+    );
+
+    if (newCourseInfoList.length === 0) {
+      console.log(`\n✓ All ${courseInfoList.length} courses already exist in the file. No new courses to scrape.`);
+      return;
+    }
+
+    console.log(`\nFound ${newCourseInfoList.length} new courses to scrape (${courseInfoList.length - newCourseInfoList.length} already exist)`);
+
+    const coursesToProcess = testLimit
+      ? newCourseInfoList.slice(0, testLimit)
+      : newCourseInfoList;
+    console.log(
+      `Processing ${coursesToProcess.length} new courses for ${schoolName}...\n`
+    );
+
+    const newCoursesMap: Record<string, Course> = {};
     let successCount = 0;
     let errorCount = 0;
-    let duplicateCount = 0;
+    let coursesSavedCount = 0;
 
     for (let i = 0; i < coursesToProcess.length; i++) {
       const cardInfo = coursesToProcess[i];
 
-      // Check if already processed (from checkpoint)
-      if (processedCodes.has(cardInfo.courseCode)) {
-        console.log(`Course ${i + 1}: ${cardInfo.courseCode} already processed (checkpoint), skipping`);
-        duplicateCount++;
-        continue;
-      }
-
-      // Extract full course data (with details from expansion)
-      const courseData = await extractCourseData(cardInfo, i, page);
+      const courseData = await extractCourseData(
+        cardInfo,
+        i,
+        page,
+        schoolName
+      );
 
       if (courseData) {
-        // Validate course has required fields
         if (!courseData.courseCode || !courseData.courseName) {
-          console.warn(`Course ${i + 1}: Missing required fields (code: ${courseData.courseCode}, name: ${courseData.courseName}), skipping`);
+          console.warn(`Course ${i + 1}: Missing required fields, skipping`);
           errorCount++;
           continue;
         }
-        
-        courses.push(courseData);
-        processedCodes.add(courseData.courseCode);
+
+        // Merge by courseCode within this school run (should be rare)
+        if (newCoursesMap[courseData.courseCode]) {
+          const existingCourse = newCoursesMap[courseData.courseCode];
+          courseData.schools.forEach((sch) => {
+            if (!existingCourse.schools.includes(sch)) {
+              existingCourse.schools.push(sch);
+            }
+          });
+        } else {
+          newCoursesMap[courseData.courseCode] = courseData;
+        }
+
         successCount++;
       } else {
         errorCount++;
       }
 
-      // Log progress
-      if ((i + 1) % PROGRESS_LOG_INTERVAL === 0 || (i + 1) === coursesToProcess.length) {
+      // Save checkpoint every CHECKPOINT_INTERVAL courses
+      const currentNewCourseCount = Object.keys(newCoursesMap).length;
+      if (currentNewCourseCount - coursesSavedCount >= CHECKPOINT_INTERVAL) {
+        // Save all new courses accumulated so far (merge handles duplicates)
+        const newCoursesToSave = Object.values(newCoursesMap);
+        const totalCourses = await saveCourses(outputFile, newCoursesToSave, existingCoursesMap, schoolName);
+        // Update existingCoursesMap to include all courses we just saved
+        newCoursesToSave.forEach(course => {
+          if (existingCoursesMap[course.courseCode]) {
+            // Merge school names if course already exists
+            course.schools.forEach((sch) => {
+              if (!existingCoursesMap[course.courseCode].schools.includes(sch)) {
+                existingCoursesMap[course.courseCode].schools.push(sch);
+              }
+            });
+          } else {
+            existingCoursesMap[course.courseCode] = course;
+          }
+        });
+        coursesSavedCount = currentNewCourseCount;
+        console.log(`\n✓ Checkpoint saved: ${newCoursesToSave.length} new courses (${totalCourses} total in file)`);
+      }
+
+      if (
+        (i + 1) % PROGRESS_LOG_INTERVAL === 0 ||
+        i + 1 === coursesToProcess.length
+      ) {
         console.log(
-          `\nProgress: ${i + 1}/${coursesToProcess.length} (${successCount} successful, ${errorCount} errors, ${duplicateCount} duplicates)`
+          `\nProgress: ${i + 1}/${coursesToProcess.length} (${successCount} successful, ${errorCount} errors)`
         );
       }
-
-      // Save checkpoint
-      if (courses.length % CHECKPOINT_INTERVAL === 0 && courses.length > 0) {
-        await saveCheckpoint(courses);
-      }
     }
 
-    console.log(`\n\nScraping complete!`);
-    console.log(`Successful: ${successCount}`);
-    console.log(`Errors: ${errorCount}`);
-    console.log(`Duplicates skipped: ${duplicateCount}`);
-    console.log(`Total courses extracted: ${courses.length}`);
-    
-    // Validate final output
-    if (courses.length === 0) {
-      console.error("\nWARNING: No courses were extracted! Check the extraction logic.");
+    const newCourses = Object.values(newCoursesMap);
+
+    console.log("\n\n" + "=".repeat(60));
+    console.log("SCRAPING COMPLETE (single school)");
+    console.log("=".repeat(60));
+    console.log(`School: ${schoolName}`);
+    console.log(`New courses scraped: ${newCourses.length}`);
+
+    if (newCourses.length === 0 && existingCodes.size === 0) {
+      console.error(
+        "\nWARNING: No courses were extracted for this school. Check the extraction logic."
+      );
       return;
     }
-    
-    // Verify courses have required fields
-    const invalidCourses = courses.filter(c => !c.courseCode || !c.courseName);
-    if (invalidCourses.length > 0) {
-      console.warn(`\nWARNING: ${invalidCourses.length} courses have missing required fields`);
-    }
 
-    // Save final output
-    await saveFinalOutput(courses);
+    // Final save - merge all new courses with existing
+    const totalCourses = await saveCourses(outputFile, newCourses, existingCoursesMap, schoolName);
+
+    console.log(`\nPer-school output saved: ${outputFile}`);
+    console.log(`Total courses in file: ${totalCourses} (${originalExistingCount} existing + ${newCourses.length} new)`);
+
   } catch (error) {
     console.error("\n\nFatal error during scraping:", error);
-    
-    // Save what we have so far
-    if (courses.length > 0) {
-      console.log("\nSaving partial results...");
-      await saveCheckpoint(courses);
-    }
-    
-    throw error;
   } finally {
     await browser.close();
   }

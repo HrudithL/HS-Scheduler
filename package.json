@@ -4,9 +4,13 @@
   "description": "SchooLinks course catalog scraper for Katy ISD",
   "main": "src/scrape.ts",
   "scripts": {
+    "run": "ts-node src/run.ts",
     "scrape": "ts-node src/scrape.ts",
-    "test": "ts-node src/scrape.ts --limit 100",
-    "migrate:prerequisites": "ts-node src/migrations/migrate-prerequisites.ts"
+    "test": "ts-node src/scrape.ts --limit 100 --school \"Seven Lakes High School\"",
+    "migrate:prerequisites": "ts-node src/migrations/migrate-prerequisites.ts",
+    "migrate:gpa": "ts-node src/migrations/migrate-gpa.ts",
+    "migrate:schools": "ts-node src/migrations/migrate-schools-to-district.ts",
+    "migrate:collapse-ab": "ts-node src/migrations/migrate-collapse-ab-courses.ts"
   },
   "keywords": ["scraper", "schoolinks", "playwright"],
   "author": "",

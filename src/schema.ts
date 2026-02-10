@@ -87,6 +87,7 @@ export const CourseSchema = z.object({
   credits: z.number(),
   tags: z.array(z.string()),
   gpa: z.number(),
+  schools: z.array(z.string()),
   
   subject: z.string(),
   term: z.string(),
@@ -120,6 +121,7 @@ export function createCourse(data: {
   courseName: string;
   credits: string | number;
   tags: string[];
+  schools?: string[];
   subject?: string;
   term?: string;
   eligibleGrades?: string | string[];
@@ -135,6 +137,7 @@ export function createCourse(data: {
     credits: typeof data.credits === "number" ? data.credits : parseCredits(data.credits),
     tags: data.tags,
     gpa: calculateGPA(courseName, data.tags),
+    schools: data.schools || [],
     subject: normalizeNA(data.subject),
     term: normalizeNA(data.term),
     eligibleGrades: Array.isArray(data.eligibleGrades) 
